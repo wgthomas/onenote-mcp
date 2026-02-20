@@ -1,0 +1,16 @@
+[project]
+name = "onenote-mcp"
+version = "0.1.0"
+description = "MCP server for OneNote desktop via COM automation"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.5.0",
+    "Pillow>=10.0.0",
+    "httpx>=0.25.0",
+]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
