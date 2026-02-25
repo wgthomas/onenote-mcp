@@ -10,12 +10,12 @@ import subprocess
 import tempfile
 import os
 
-# OneNote hierarchy scope constants
-NOTEBOOKS = 0  # hsNotebooks
-SECTIONS = 1   # hsSections
-PAGES = 2      # hsPages
-ALL = 3         # hsSelf
-PAGE_INFO = 4   # hsChildren — full hierarchy
+# OneNote hierarchy scope constants (HierarchyScope enum)
+SELF = 0        # hsSelf — just the node itself
+CHILDREN = 1    # hsChildren — node + immediate children
+NOTEBOOKS = 2   # hsNotebooks — all notebooks
+SECTIONS = 3    # hsSections — notebooks + sections
+PAGES = 4       # hsPages — notebooks + sections + pages
 
 
 def _run_ps(script: str, timeout: int = 30) -> str:
@@ -51,7 +51,7 @@ def _run_ps_to_file(script: str, timeout: int = 30) -> str:
             os.unlink(tmp)
 
 
-def get_hierarchy(start_node_id: str = "", scope: int = PAGE_INFO) -> str:
+def get_hierarchy(start_node_id: str = "", scope: int = PAGES) -> str:
     """Get OneNote hierarchy XML."""
     # Escape single quotes in the ID
     safe_id = start_node_id.replace("'", "''")

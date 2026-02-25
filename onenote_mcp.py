@@ -100,7 +100,7 @@ def onenote_get_notebook_tree(notebook_id: str = "") -> str:
     Args:
         notebook_id: Optional notebook ID to scope the tree. Empty string = all notebooks.
     """
-    xml = com_client.get_hierarchy(notebook_id, com_client.PAGE_INFO)
+    xml = com_client.get_hierarchy(notebook_id, com_client.PAGES)
     notebooks = parse_notebooks(xml)
     result = []
     for nb in notebooks:
