@@ -140,3 +140,31 @@ $onenote = New-Object -ComObject OneNote.Application
 $onenote.NavigateTo('{safe_id}')
 """
     _run_ps(script)
+
+
+def open_hierarchy(path: str, relative_to_id: str = "") -> str:
+    """Create or open a notebook/section via file path. Returns the object ID.
+
+    For sections: pass path to a .one file under a notebook folder.
+    For section groups: pass path to a folder under a notebook folder.
+    The parent notebook must already exist.
+    """
+    safe_path = path.replace("'", "''")
+    safe_rel = relative_to_id.replace("'", "''")
+    script = f"""
+$onenote = New-Object -ComObject OneNote.Application
+$objectId = ""
+$onenote.OpenHierarchy('{safe_path}', '{safe_rel}', [ref]$objectId, 0)
+$objectId
+"""
+    return _run_ps(script).strip()
+
+
+def delete_hierarchy(object_id: str) -> None:
+    """Delete a page, section, or section group."""
+    safe_id = object_id.replace("'", "''")
+    script = f"""
+$onenote = New-Object -ComObject OneNote.Application
+$onenote.DeleteHierarchy('{safe_id}')
+"""
+    _run_ps(script)
