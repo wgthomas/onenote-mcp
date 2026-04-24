@@ -22,7 +22,7 @@ from onenote_lib.xml_parser import (
 
 mcp = FastMCP(
     "OneNote MCP",
-    description="Access OneNote desktop notebooks via COM automation. "
+    instructions="Access OneNote desktop notebooks via COM automation. "
     "Read, search, and analyze pages including embedded images.",
 )
 
