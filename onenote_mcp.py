@@ -20,11 +20,7 @@ from onenote_lib.xml_parser import (
     parse_search_results,
 )
 
-mcp = FastMCP(
-    "OneNote MCP",
-    description="Access OneNote desktop notebooks via COM automation. "
-    "Read, search, and analyze pages including embedded images.",
-)
+mcp = FastMCP("OneNote MCP")
 
 
 # ── Navigation Tools ─────────────────────────────────────────────────
