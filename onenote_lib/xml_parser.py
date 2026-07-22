@@ -1,5 +1,6 @@
 """Parse OneNote XML into markdown and structured data."""
 
+import html
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -57,20 +58,46 @@ class NotebookInfo:
 
 
 def parse_notebooks(xml_str: str) -> list[NotebookInfo]:
-    """Parse hierarchy XML into notebook list."""
+    """Parse hierarchy XML into notebook list.
+
+    GetHierarchy returns a different root element depending on the start node:
+    an empty start node yields <one:Notebooks>, but scoping to a notebook ID
+    yields a bare <one:Notebook>. Handle both so notebook-scoped calls work.
+    """
     root = ET.fromstring(xml_str)
-    notebooks = []
-    for nb in root.findall("one:Notebook", NS):
-        notebook = NotebookInfo(
-            id=nb.get("ID", ""),
-            name=nb.get("name", ""),
-            path=nb.get("path"),
-            last_modified=nb.get("lastModifiedTime"),
-        )
-        notebook.sections = _parse_sections(nb)
-        notebook.section_groups = _parse_section_groups(nb)
-        notebooks.append(notebook)
-    return notebooks
+    if _local_tag(root.tag) == "Notebook":
+        return [_parse_notebook(root)]
+    return [_parse_notebook(nb) for nb in root.findall("one:Notebook", NS)]
+
+
+def _parse_notebook(nb) -> NotebookInfo:
+    """Build a NotebookInfo from a <one:Notebook> element."""
+    notebook = NotebookInfo(
+        id=nb.get("ID", ""),
+        name=nb.get("name", ""),
+        path=nb.get("path"),
+        last_modified=nb.get("lastModifiedTime"),
+    )
+    notebook.sections = _parse_sections(nb)
+    notebook.section_groups = _parse_section_groups(nb)
+    return notebook
+
+
+def parse_section(xml_str: str) -> SectionInfo | None:
+    """Parse a section-scoped hierarchy XML (root is a bare <one:Section>).
+
+    Returns None if the XML is not section-scoped.
+    """
+    root = ET.fromstring(xml_str)
+    if _local_tag(root.tag) != "Section":
+        return None
+    section = SectionInfo(
+        id=root.get("ID", ""),
+        name=root.get("name", ""),
+        path=root.get("path"),
+    )
+    section.pages = _parse_pages(root)
+    return section
 
 
 def _parse_sections(parent) -> list[SectionInfo]:
@@ -82,15 +109,22 @@ def _parse_sections(parent) -> list[SectionInfo]:
             name=sec.get("name", ""),
             path=sec.get("path"),
         )
-        for page in sec.findall("one:Page", NS):
-            section.pages.append(PageInfo(
-                id=page.get("ID", ""),
-                name=page.get("name", ""),
-                last_modified=page.get("lastModifiedTime"),
-                level=int(page.get("pageLevel", "0")),
-            ))
+        section.pages = _parse_pages(sec)
         sections.append(section)
     return sections
+
+
+def _parse_pages(parent) -> list[PageInfo]:
+    """Parse Page elements directly under a parent node."""
+    return [
+        PageInfo(
+            id=page.get("ID", ""),
+            name=page.get("name", ""),
+            last_modified=page.get("lastModifiedTime"),
+            level=int(page.get("pageLevel", "0")),
+        )
+        for page in parent.findall("one:Page", NS)
+    ]
 
 
 def _parse_section_groups(parent) -> list[SectionGroupInfo]:
@@ -122,11 +156,12 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
 
     images: list[ImageRef] = []
     img_counter = 0
+    quick_styles = parse_quick_styles(root)
 
     # Process all Outline elements (main content containers)
     for outline in root.findall(".//one:Outline", NS):
         outline_lines, outline_images, img_counter = _process_outline(
-            outline, images_start_index=img_counter
+            outline, images_start_index=img_counter, quick_styles=quick_styles
         )
         lines.extend(outline_lines)
         images.extend(outline_images)
@@ -146,40 +181,89 @@ def parse_page_to_markdown(xml_str: str) -> tuple[str, list[ImageRef]]:
     return "\n".join(lines).strip(), images
 
 
-def _process_outline(outline, images_start_index: int = 0) -> tuple[list[str], list[ImageRef], int]:
-    """Process an Outline element into markdown lines."""
-    lines = []
-    images = []
+def _process_outline(
+    outline, images_start_index: int = 0, quick_styles: dict[str, str] | None = None
+) -> tuple[list[str], list[ImageRef], int]:
+    """Process an Outline element into markdown lines.
+
+    Walks the OE/OEChildren tree explicitly rather than using iter(), so that
+    table cells are rendered once (by _process_table) instead of a second time
+    as loose text, and so nesting depth survives as markdown indentation.
+    """
+    lines: list[str] = []
+    images: list[ImageRef] = []
     img_counter = images_start_index
+    styles = quick_styles or {}
 
-    for oe in outline.iter():
-        tag = _local_tag(oe.tag)
+    def walk(oe_children, depth: int) -> None:
+        nonlocal img_counter
+        for oe in oe_children.findall("one:OE", NS):
+            heading = _style_prefix(oe, styles)
+            prefix = heading or _list_prefix(oe)
+            indent = "" if heading else "    " * depth
+            for child in oe:
+                tag = _local_tag(child.tag)
 
-        if tag == "T":
-            # Text element — extract CDATA content
-            text = oe.text or ""
-            text = _clean_text(text)
-            if text.strip():
-                lines.append(text)
+                if tag == "T":
+                    text = _clean_text(child.text or "")
+                    if text.strip():
+                        if heading:
+                            # OneNote materialises a heading style's weight as an
+                            # inline bold span; "# **Title**" would be redundant.
+                            text = text.replace("**", "")
+                        lines.append(f"{indent}{prefix}{text}")
+                        # Only the first line of an OE carries the marker.
+                        prefix = heading = ""
 
-        elif tag == "Image":
-            cb_id = _get_callback_id(oe)
-            if cb_id:
-                img_counter += 1
-                ref = _make_image_ref(oe, img_counter)
-                if ref:
-                    images.append(ref)
-                    lines.append(f"[Image {ref.index}]")
+                elif tag == "Table":
+                    lines.extend(_process_table(child))
 
-        elif tag == "Table":
-            table_lines = _process_table(oe)
-            lines.extend(table_lines)
+                elif tag == "Image":
+                    if _get_callback_id(child):
+                        img_counter += 1
+                        ref = _make_image_ref(child, img_counter)
+                        if ref:
+                            images.append(ref)
+                            lines.append(f"{indent}[Image {ref.index}]")
 
-        elif tag == "InsertedFile":
-            name = oe.get("preferredName", "file")
-            lines.append(f"[Attached: {name}]")
+                elif tag == "InsertedFile":
+                    name = child.get("preferredName", "file")
+                    lines.append(f"{indent}[Attached: {name}]")
+
+                elif tag == "OEChildren":
+                    walk(child, depth + 1)
+
+    for oe_children in outline.findall("one:OEChildren", NS):
+        walk(oe_children, 0)
 
     return lines, images, img_counter
+
+
+def _style_prefix(oe, quick_styles: dict[str, str]) -> str:
+    """Map a OneNote quick style (h1..h6) onto a markdown heading prefix."""
+    name = quick_styles.get(oe.get("quickStyleIndex", ""), "")
+    match = re.fullmatch(r"h([1-6])", name)
+    return "#" * int(match.group(1)) + " " if match else ""
+
+
+def _list_prefix(oe) -> str:
+    """Render a OneNote bullet or number list marker as markdown."""
+    lst = oe.find("one:List", NS)
+    if lst is None:
+        return ""
+    if lst.find("one:Bullet", NS) is not None:
+        return "- "
+    if lst.find("one:Number", NS) is not None:
+        return "1. "
+    return ""
+
+
+def parse_quick_styles(root) -> dict[str, str]:
+    """Map quickStyleIndex -> style name (e.g. "1" -> "h1") for a page."""
+    return {
+        qs.get("index", ""): qs.get("name", "")
+        for qs in root.findall("one:QuickStyleDef", NS)
+    }
 
 
 def _process_table(table_elem) -> list[str]:
@@ -257,18 +341,36 @@ def _local_tag(tag: str) -> str:
     return tag
 
 
+# OneNote normalises the markup it stores: attributes come back single-quoted
+# (style='font-weight:bold'), some are unquoted (lang=ja), and tags may contain
+# newlines. These patterns accept either quoting style.
+_LINK_RE = re.compile(r"""<a\b[^>]*\bhref=(["'])(.*?)\1[^>]*>(.*?)</a>""", re.I | re.S)
+_BOLD_SPAN_RE = re.compile(
+    r"""<span\b[^>]*\bstyle=(["'])[^"']*font-weight:\s*bold[^"']*\1[^>]*>(.*?)</span>""",
+    re.I | re.S,
+)
+_ITALIC_SPAN_RE = re.compile(
+    r"""<span\b[^>]*\bstyle=(["'])[^"']*font-style:\s*italic[^"']*\1[^>]*>(.*?)</span>""",
+    re.I | re.S,
+)
+
+
 def _clean_text(text: str) -> str:
-    """Clean OneNote text content (strip HTML-like tags from CDATA)."""
-    # OneNote sometimes wraps text in span tags with styles
+    """Convert OneNote's inline HTML (inside CDATA) to markdown.
+
+    Links, bold and italic are preserved rather than discarded; everything else
+    is stripped. Entities are decoded last, in one pass, so that escaped markup
+    such as "&amp;lt;" does not get decoded twice into a real tag.
+    """
+    text = _LINK_RE.sub(lambda m: f"[{m.group(3)}]({m.group(2)})", text)
+    text = _BOLD_SPAN_RE.sub(r"**\2**", text)
+    text = _ITALIC_SPAN_RE.sub(r"*\2*", text)
+    text = re.sub(r"</?(?:b|strong)\b[^>]*>", "**", text, flags=re.I)
+    text = re.sub(r"</?(?:i|em)\b[^>]*>", "*", text, flags=re.I)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    # Drop any remaining markup, then decode entities in a single pass.
     text = re.sub(r"<[^>]+>", "", text)
-    # Decode common HTML entities
-    text = text.replace("&amp;", "&")
-    text = text.replace("&lt;", "<")
-    text = text.replace("&gt;", ">")
-    text = text.replace("&quot;", '"')
-    text = text.replace("&apos;", "'")
-    text = text.replace("&nbsp;", " ")
-    return text
+    return html.unescape(text)
 
 
 def parse_search_results(xml_str: str) -> list[dict]:
