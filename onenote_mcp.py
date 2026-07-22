@@ -18,11 +18,12 @@ from onenote_lib.xml_parser import (
     parse_notebooks,
     parse_page_to_markdown,
     parse_search_results,
+    parse_section,
 )
 
 mcp = FastMCP(
     "OneNote MCP",
-    description="Access OneNote desktop notebooks via COM automation. "
+    instructions="Access OneNote desktop notebooks via COM automation. "
     "Read, search, and analyze pages including embedded images.",
 )
 
@@ -71,41 +72,46 @@ def onenote_list_pages(section_id: str) -> str:
         section_id: The section's OneNote ID (from onenote_list_sections)
     """
     xml = com_client.get_hierarchy(section_id, com_client.PAGES)
-    notebooks = parse_notebooks(xml)
+    section = parse_section(xml)
+    if section is None:
+        return json.dumps({"error": "Section not found"})
 
-    pages = []
-    for nb in notebooks:
-        for sec in nb.sections:
-            if sec.id == section_id:
-                for p in sec.pages:
-                    pages.append({
-                        "id": p.id,
-                        "name": p.name,
-                        "last_modified": p.last_modified,
-                        "level": p.level,
-                    })
-                return json.dumps(pages, indent=2)
-        # Check section groups
-        found = _find_section_pages(nb.section_groups, section_id)
-        if found is not None:
-            return json.dumps(found, indent=2)
-
-    return json.dumps({"error": "Section not found"})
+    return json.dumps(
+        [
+            {
+                "id": p.id,
+                "name": p.name,
+                "last_modified": p.last_modified,
+                "level": p.level,
+            }
+            for p in section.pages
+        ],
+        indent=2,
+    )
 
 
 @mcp.tool()
-def onenote_get_notebook_tree(notebook_id: str = "") -> str:
-    """Get the full hierarchy: notebooks -> section groups -> sections -> page titles.
+def onenote_get_notebook_tree(notebook_id: str = "", include_pages: bool = False) -> str:
+    """Get the hierarchy: notebooks -> section groups -> sections (-> page titles).
+
+    Page titles are omitted by default: across all notebooks they can run to
+    hundreds of thousands of tokens. Scope to one notebook, or call
+    onenote_list_pages for a single section, before asking for pages.
 
     Args:
         notebook_id: Optional notebook ID to scope the tree. Empty string = all notebooks.
+        include_pages: Include page titles. Requires notebook_id to avoid huge output.
     """
-    xml = com_client.get_hierarchy(notebook_id, com_client.PAGES)
+    if include_pages and not notebook_id:
+        return json.dumps({
+            "error": "include_pages requires a notebook_id — the full page tree is too "
+                     "large to return for all notebooks at once."
+        })
+
+    scope = com_client.PAGES if include_pages else com_client.SECTIONS
+    xml = com_client.get_hierarchy(notebook_id, scope)
     notebooks = parse_notebooks(xml)
-    result = []
-    for nb in notebooks:
-        result.append(_notebook_to_tree(nb))
-    return json.dumps(result, indent=2)
+    return json.dumps([_notebook_to_tree(nb) for nb in notebooks], indent=2)
 
 
 # ── Content Retrieval Tools ──────────────────────────────────────────
@@ -360,26 +366,6 @@ def _flatten_sections(
         group_path = f"{prefix}/{sg.name}" if prefix else sg.name
         result.extend(_flatten_sections(sg.sections, sg.section_groups, group_path))
     return result
-
-
-def _find_section_pages(section_groups: list[SectionGroupInfo], section_id: str):
-    """Recursively find pages in a section within section groups."""
-    for sg in section_groups:
-        for sec in sg.sections:
-            if sec.id == section_id:
-                return [
-                    {
-                        "id": p.id,
-                        "name": p.name,
-                        "last_modified": p.last_modified,
-                        "level": p.level,
-                    }
-                    for p in sec.pages
-                ]
-        found = _find_section_pages(sg.section_groups, section_id)
-        if found is not None:
-            return found
-    return None
 
 
 def _notebook_to_tree(nb: NotebookInfo) -> dict:

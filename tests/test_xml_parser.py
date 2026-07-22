@@ -6,6 +6,7 @@ from onenote_lib.xml_parser import (
     parse_notebooks,
     parse_page_to_markdown,
     parse_search_results,
+    parse_section,
 )
 
 NS = "http://schemas.microsoft.com/office/onenote/2013/onenote"
@@ -146,7 +147,8 @@ class TestParsePageToMarkdown:
         md, images = parse_page_to_markdown(PAGE_XML)
         assert "# Test Page" in md
         assert "This is paragraph one." in md
-        assert "This is paragraph two with bold text." in md
+        # Bold is carried through as markdown rather than stripped.
+        assert "This is paragraph two with **bold** text." in md
         assert "Text after image." in md
 
     def test_image_references(self):
@@ -189,3 +191,135 @@ class TestParseSearchResults:
         empty_xml = f'<one:Notebooks xmlns:one="{NS}"/>'
         results = parse_search_results(empty_xml)
         assert len(results) == 0
+
+
+# GetHierarchy returns a different root element depending on the start node:
+# "" yields <one:Notebooks>, a notebook ID yields a bare <one:Notebook>, and a
+# section ID yields a bare <one:Section> whose pages are direct children.
+
+SCOPED_NOTEBOOK_XML = f"""<?xml version="1.0"?>
+<one:Notebook xmlns:one="{NS}" name="Work Notes" ID="nb-001">
+  <one:Section name="Meeting Notes" ID="sec-001">
+    <one:Page ID="page-001" name="Monday Standup" pageLevel="0"/>
+  </one:Section>
+  <one:SectionGroup name="Archive" ID="sg-001">
+    <one:Section name="Old Notes" ID="sec-002"/>
+  </one:SectionGroup>
+</one:Notebook>"""
+
+SCOPED_SECTION_XML = f"""<?xml version="1.0"?>
+<one:Section xmlns:one="{NS}" name="Meeting Notes" ID="sec-001">
+  <one:Page ID="page-001" name="Monday Standup" lastModifiedTime="2026-02-14T09:00:00Z" pageLevel="0"/>
+  <one:Page ID="page-002" name="Sprint Review" pageLevel="1"/>
+</one:Section>"""
+
+
+class TestScopedHierarchy:
+    def test_bare_notebook_root(self):
+        notebooks = parse_notebooks(SCOPED_NOTEBOOK_XML)
+        assert len(notebooks) == 1
+        assert notebooks[0].name == "Work Notes"
+        assert notebooks[0].sections[0].name == "Meeting Notes"
+        assert notebooks[0].section_groups[0].name == "Archive"
+
+    def test_bare_section_root(self):
+        section = parse_section(SCOPED_SECTION_XML)
+        assert section is not None
+        assert section.name == "Meeting Notes"
+        assert [p.name for p in section.pages] == ["Monday Standup", "Sprint Review"]
+        assert section.pages[1].level == 1
+
+    def test_parse_section_rejects_other_roots(self):
+        assert parse_section(SCOPED_NOTEBOOK_XML) is None
+        assert parse_section(HIERARCHY_XML) is None
+
+
+TABLE_PAGE_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-t" name="Table Page">
+  <one:Outline><one:OEChildren>
+    <one:OE><one:Table>
+      <one:Row>
+        <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[H1]]></one:T></one:OE></one:OEChildren></one:Cell>
+        <one:Cell><one:OEChildren><one:OE><one:T><![CDATA[H2]]></one:T></one:OE></one:OEChildren></one:Cell>
+      </one:Row>
+    </one:Table></one:OE>
+  </one:OEChildren></one:Outline>
+</one:Page>"""
+
+RICH_PAGE_XML = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="page-r" name="Rich Page">
+  <one:QuickStyleDef index="0" name="PageTitle"/>
+  <one:QuickStyleDef index="1" name="p"/>
+  <one:QuickStyleDef index="2" name="h2"/>
+  <one:Outline><one:OEChildren>
+    <one:OE quickStyleIndex="2"><one:T><![CDATA[A Heading]]></one:T></one:OE>
+    <one:OE quickStyleIndex="1"><one:T><![CDATA[top level]]></one:T>
+      <one:OEChildren>
+        <one:OE><one:T><![CDATA[nested once]]></one:T>
+          <one:OEChildren><one:OE><one:T><![CDATA[nested twice]]></one:T></one:OE></one:OEChildren>
+        </one:OE>
+      </one:OEChildren>
+    </one:OE>
+    <one:OE><one:T><![CDATA[see <a href="https://example.com/x">the docs</a>]]></one:T></one:OE>
+    <one:OE><one:T><![CDATA[<span style="font-weight:bold">strong</span>]]></one:T></one:OE>
+    <one:OE><one:T><![CDATA[5 &amp;lt; 6]]></one:T></one:OE>
+  </one:OEChildren></one:Outline>
+</one:Page>"""
+
+
+class TestMarkdownFidelity:
+    def test_table_cells_are_not_duplicated(self):
+        md, _ = parse_page_to_markdown(TABLE_PAGE_XML)
+        # Each cell renders once, inside the markdown table — not again as loose text.
+        assert md.count("H1") == 1
+        assert "| H1 | H2 |" in md
+
+    def test_quick_style_becomes_heading(self):
+        md, _ = parse_page_to_markdown(RICH_PAGE_XML)
+        assert "## A Heading" in md
+
+    def test_nesting_becomes_indentation(self):
+        md, _ = parse_page_to_markdown(RICH_PAGE_XML)
+        assert "\ntop level" in md
+        assert "\n    nested once" in md
+        assert "\n        nested twice" in md
+
+    def test_links_keep_their_url(self):
+        md, _ = parse_page_to_markdown(RICH_PAGE_XML)
+        assert "[the docs](https://example.com/x)" in md
+
+    def test_bold_span_becomes_markdown(self):
+        md, _ = parse_page_to_markdown(RICH_PAGE_XML)
+        assert "**strong**" in md
+
+    def test_onenote_normalised_markup(self):
+        # What OneNote actually stores after it rewrites a page: single-quoted
+        # attributes, unquoted lang attributes, and newlines inside tags.
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="p" name="Normalised">
+  <one:Outline><one:OEChildren><one:OE><one:T><![CDATA[<span
+lang=ja>item </span><span style='font-weight:bold' lang=x-none>bold</span><span
+lang=ja> and </span><a href="https://example.com"><span lang=x-none>link</span></a>]]></one:T></one:OE>
+  </one:OEChildren></one:Outline>
+</one:Page>"""
+        md, _ = parse_page_to_markdown(xml)
+        assert "**bold**" in md
+        assert "[link](https://example.com)" in md
+
+    def test_heading_does_not_double_up_bold(self):
+        # OneNote renders a heading style's weight as an inline bold span.
+        xml = f"""<?xml version="1.0"?>
+<one:Page xmlns:one="{NS}" ID="p" name="H">
+  <one:QuickStyleDef index="0" name="h1"/>
+  <one:Outline><one:OEChildren>
+    <one:OE quickStyleIndex="0"><one:T><![CDATA[<span style='font-weight:bold'>Title</span>]]></one:T></one:OE>
+  </one:OEChildren></one:Outline>
+</one:Page>"""
+        md, _ = parse_page_to_markdown(xml)
+        assert "# Title" in md
+        assert "**" not in md
+
+    def test_entities_are_decoded_once(self):
+        md, _ = parse_page_to_markdown(RICH_PAGE_XML)
+        # "&amp;lt;" is an escaped "&lt;" — it must not decode all the way to "<".
+        assert "5 &lt; 6" in md
